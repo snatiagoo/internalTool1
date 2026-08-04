@@ -19,38 +19,44 @@ export default function Dashboard() {
             {isOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
                     <div className="w-full max-w-md rounded-lg border border-foreground/10 bg-background p-6 shadow-xl">
-                        <h2 className="text-lg font-semibold">New plan</h2>
+                        <h2 className="text-lg font-semibold">New project</h2>
 
                         <div className="mt-4 flex flex-col gap-3">
                             <input
                                 type="text"
                                 placeholder="Name"
+                                name="name"
                                 className="rounded-md border border-foreground/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-foreground/40"
                             />
                             <input
                                 type="text"
                                 placeholder="Description"
+                                name="description"
                                 className="rounded-md border border-foreground/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-foreground/40"
                             />
 
                             <input
                                 type="text"
+                                name="locked_step"
                                 placeholder="Important step"
                                 className="rounded-md border-2 border-foreground bg-foreground/5 px-3 py-2 text-sm font-medium outline-none focus:border-foreground"
                             />
 
                             <input
                                 type="text"
+                                
                                 placeholder="Step 1"
                                 className="rounded-md border border-foreground/10 bg-foreground/3 px-3 py-2 text-sm text-foreground/70 outline-none focus:border-foreground/30"
                             />
                             <input
                                 type="text"
+                                
                                 placeholder="Step 2"
                                 className="rounded-md border border-foreground/10 bg-foreground/3 px-3 py-2 text-sm text-foreground/70 outline-none focus:border-foreground/30"
                             />
                             <input
                                 type="text"
+                                
                                 placeholder="Step 3"
                                 className="rounded-md border border-foreground/10 bg-foreground/3 px-3 py-2 text-sm text-foreground/70 outline-none focus:border-foreground/30"
                             />
