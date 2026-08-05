@@ -1,7 +1,7 @@
 'use server';
 
-import { auth, currentUser } from "@clerk/nextjs/server";
-import { projectData, project, step, SaveProjectResult, FetchProjectResult } from "./definitions";
+import { currentUser } from "@clerk/nextjs/server";
+import { projectData, project, step, SaveProjectResult, FetchProjectsResult, FetchProjectResult } from "./definitions";
 import { neon } from "@neondatabase/serverless";
 
 const sql = neon(`${process.env.DATABASE_URL}`);
@@ -15,7 +15,7 @@ export async function saveProject(data: projectData): Promise<SaveProjectResult>
     if(user == undefined) return { success: false, error: "Not authenticated" };
     const userId = user.id;
 
-    const { name, description, state, steps} : project = data;
+    const { name, description, state, steps } = data;
 
     // `projectData` types `steps` as an array, but this is a server action —
     // it's reachable from the client without going through TypeScript, so a
@@ -54,7 +54,7 @@ export async function saveProject(data: projectData): Promise<SaveProjectResult>
 
 
 
-export async function fetchProject(project_id: string): Promise<FetchProjectResult>{
+export async function fetchProjects(): Promise<FetchProjectsResult>{
     const user = await currentUser();
     // Return a typed result instead of throwing so the caller (a form/UI)
     // can branch on `.success` instead of needing a try/catch of its own.
@@ -62,9 +62,57 @@ export async function fetchProject(project_id: string): Promise<FetchProjectResu
     const userId = user.id;
 
     try {
-        // Basic approach: two round trips. Fetch the project first, scoped
-        // to this user, so we can both check ownership and fail fast with
-        // "not found" before spending a second query on its steps.
+        const projectRows = await sql`
+            SELECT project_id, name, description, state, userid
+            FROM projects
+            WHERE userid = ${userId}
+        `;
+
+        // No projects -> skip the steps round trip entirely.
+        if(projectRows.length === 0) return { success: true, projects: [] };
+
+        const projectIds = projectRows.map((row) => row.project_id);
+
+        // One query for all steps across every project, instead of one
+        // query per project (N+1), then group them back up in JS below.
+        const stepRows = await sql`
+            SELECT step_desc, step_state, step_order, locked, project_id
+            FROM steps
+            WHERE project_id = ANY(${projectIds})
+            ORDER BY step_order
+        `;
+
+        const stepsByProjectId = new Map<number, step[]>();
+        for(const row of stepRows){
+            const existing = stepsByProjectId.get(row.project_id) ?? [];
+            existing.push(row as step);
+            stepsByProjectId.set(row.project_id, existing);
+        }
+
+        const projects: project[] = projectRows.map((row) => ({
+            project_id: row.project_id,
+            name: row.name,
+            description: row.description,
+            state: row.state,
+            userid: row.userid,
+            steps: stepsByProjectId.get(row.project_id) ?? [],
+        }));
+
+        return { success: true, projects };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to fetch projects";
+        return { success: false, error: message };
+    }
+}
+
+
+export async function fetchProjectById(project_id: string): Promise<FetchProjectResult> {
+    const user = await currentUser();
+    if(user == undefined) return { success: false, error: "Not authenticated" };
+    const userId = user.id;
+
+    try {
+        // Scoped by userId, same ownership reasoning as everywhere else here.
         const [projectRow] = await sql`
             SELECT project_id, name, description, state, userid
             FROM projects
@@ -73,54 +121,98 @@ export async function fetchProject(project_id: string): Promise<FetchProjectResu
 
         if(!projectRow) return { success: false, error: "Project not found" };
 
-        const steps = await sql`
+        const stepRows = await sql`
             SELECT step_desc, step_state, step_order, locked, project_id
             FROM steps
             WHERE project_id = ${project_id}
             ORDER BY step_order
         `;
 
-        /* Easier alternative: a single JOIN, one round trip instead of two.
-           Trades away the "fail fast before querying steps" benefit above,
-           and requires grouping the flat rows back into project + steps[]
-           in JS afterwards.
-
-        const rows = await sql`
-            SELECT p.project_id, p.name, p.description, p.state, p.userid,
-                   s.step_desc, s.step_state, s.step_order, s.locked
-            FROM projects p
-            LEFT JOIN steps s ON s.project_id = p.project_id
-            WHERE p.project_id = ${project_id} AND p.userid = ${userId}
-            ORDER BY s.step_order
-        `;
-
-        if(rows.length === 0) return { success: false, error: "Project not found" };
-
-        const { project_id: id, name, description, state, userid } = rows[0];
-        const steps = rows
-            .filter(r => r.step_desc != null) // drop the null step row from a project with no steps
-            .map(r => ({
-                step_desc: r.step_desc,
-                step_state: r.step_state,
-                step_order: r.step_order,
-                locked: r.locked,
-                project_id: id,
-            }));
-        */
-
-        const projectData: projectData = {
+        const fetchedProject: project = {
             project_id: projectRow.project_id,
             name: projectRow.name,
             description: projectRow.description,
             state: projectRow.state,
             userid: projectRow.userid,
-            steps: steps as step[],
+            steps: stepRows as step[],
         };
 
-        return { success: true, project: projectData };
+        return { success: true, project: fetchedProject };
     } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to fetch project";
         return { success: false, error: message };
     }
+}
 
+
+export async function deleteProject(project_id: string): Promise<SaveProjectResult> {
+    const user = await currentUser();
+    if(user == undefined) return { success: false, error: "Not authenticated" };
+    const userId = user.id;
+
+    try {
+        // Scoped by userId for the same ownership reason as editProject.
+        // steps.project_id has ON DELETE CASCADE, so its rows are removed
+        // automatically — no separate DELETE FROM steps needed here.
+        const [deleted] = await sql`
+            DELETE FROM projects
+            WHERE project_id = ${project_id} AND userid = ${userId}
+            RETURNING project_id
+        `;
+
+        if(!deleted) return { success: false, error: "Project not found" };
+
+        return { success: true, projectId: deleted.project_id };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to delete project";
+        return { success: false, error: message };
+    }
+}
+
+
+export async function editProject(data: project): Promise<SaveProjectResult> {
+    const user = await currentUser();
+    if(user == undefined) return { success: false, error: "Not authenticated" };
+    const userId = user.id;
+
+    // `data.userid` is ignored here too — same reasoning as saveProject:
+    // never trust a client-supplied userid, scope by the authenticated user.
+    const { project_id, name, description, state, steps } = data;
+
+    // Same reasoning as saveProject: this is a server action, so validate
+    // `steps` is actually an array before looping over it.
+    if(!Array.isArray(steps)) return { success: false, error: "Invalid steps data" };
+
+    try {
+        // Scope the UPDATE to userId, not just project_id — otherwise any
+        // authenticated user could edit another user's project by guessing
+        // its project_id, since project_id alone isn't a secret.
+        const [updated] = await sql`
+            UPDATE projects
+            SET name = ${name}, description = ${description}, state = ${state}
+            WHERE project_id = ${project_id} AND userid = ${userId}
+            RETURNING project_id
+        `;
+
+        // No row matched -> either the project doesn't exist or it isn't
+        // this user's, so fail before touching any steps.
+        if(!updated) return { success: false, error: "Project not found" };
+
+        // Full replace: drop the old steps, then insert the current set.
+        await sql`DELETE FROM steps WHERE project_id = ${project_id}`;
+
+        for(let i = 0; i < steps.length; i++){
+            const { step_desc, step_state, step_order, locked } = steps[i];
+
+            await sql`
+                INSERT INTO steps (step_desc, step_state, step_order, locked, project_id)
+                VALUES (${step_desc}, ${step_state}, ${step_order}, ${locked}, ${project_id})
+            `;
+        }
+
+        return { success: true, projectId: updated.project_id };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to edit project";
+        return { success: false, error: message };
+    }
 }

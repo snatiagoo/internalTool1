@@ -1,16 +1,19 @@
 
+// Shape the dashboard form submits to create a project — no project_id (not
+// assigned yet) and no userid (saveProject derives it from the authenticated
+// user rather than trusting a client-supplied value).
 export type projectData = {
     name: string,
-    project_id: string,
     description: string,
     state: string,
-    userid: string,
     steps: step[],
 }
 
+// Shape of a project once it exists in the DB (fetchProjects' result, and
+// what editProject needs to identify which project to update).
 export type project = {
-    name: string,
     project_id: string,
+    name: string,
     description: string,
     state: string,
     userid: string,
@@ -33,6 +36,10 @@ export type SaveProjectResult =
     | { success: true, projectId: number }
     | { success: false, error: string }
 
+export type FetchProjectsResult =
+    | { success: true, projects: project[] }
+    | { success: false, error: string }
+
 export type FetchProjectResult =
-    | { success: true, project: projectData }
+    | { success: true, project: project }
     | { success: false, error: string }
