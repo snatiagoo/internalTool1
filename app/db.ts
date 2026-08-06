@@ -1,7 +1,7 @@
 'use server';
 
 import { currentUser } from "@clerk/nextjs/server";
-import { projectData, project, step, SaveProjectResult, FetchProjectsResult, FetchProjectResult } from "./definitions";
+import { projectData, project, stepData, SaveProjectResult, FetchProjectsResult, FetchProjectResult } from "./definitions";
 import { neon } from "@neondatabase/serverless";
 
 const sql = neon(`${process.env.DATABASE_URL}`);
@@ -10,23 +10,16 @@ const sql = neon(`${process.env.DATABASE_URL}`);
 export async function saveProject(data: projectData): Promise<SaveProjectResult> {
 
     const user = await currentUser();
-    // Return a typed result instead of throwing so the caller (a form/UI)
-    // can branch on `.success` instead of needing a try/catch of its own.
+    // Typed result instead of throw, so callers can branch on `.success`.
     if(user == undefined) return { success: false, error: "Not authenticated" };
     const userId = user.id;
 
     const { name, description, state, steps } = data;
 
-    // `projectData` types `steps` as an array, but this is a server action —
-    // it's reachable from the client without going through TypeScript, so a
-    // malformed request could send `steps` as undefined/null/non-array and
-    // crash on `steps.length` below before we ever hit the DB.
+    // Server actions bypass TS at runtime, so validate `steps` is actually an array.
     if(!Array.isArray(steps)) return { success: false, error: "Invalid steps data" };
 
-    // Postgres already enforces NOT NULL on every column via the schema, so
-    // we don't duplicate that validation here — we just need to turn a DB
-    // failure (bad data, connection issue, etc.) into a typed error instead
-    // of an unhandled rejection.
+    // DB already enforces NOT NULL; this just turns any failure into a typed error.
     try {
         const [project] = await sql`
             INSERT INTO projects (name, description, state, userid)
@@ -46,7 +39,7 @@ export async function saveProject(data: projectData): Promise<SaveProjectResult>
 
         return { success: true, projectId };
     } catch (err) {
-        // err is `unknown` in TS catch blocks, so narrow before reading `.message`.
+        // narrow `unknown` before reading `.message`
         const message = err instanceof Error ? err.message : "Failed to save project";
         return { success: false, error: message };
     }
@@ -56,8 +49,7 @@ export async function saveProject(data: projectData): Promise<SaveProjectResult>
 
 export async function fetchProjects(): Promise<FetchProjectsResult>{
     const user = await currentUser();
-    // Return a typed result instead of throwing so the caller (a form/UI)
-    // can branch on `.success` instead of needing a try/catch of its own.
+    // Typed result instead of throw, so callers can branch on `.success`.
     if(user == undefined) return { success: false, error: "Not authenticated" };
     const userId = user.id;
 
@@ -73,19 +65,18 @@ export async function fetchProjects(): Promise<FetchProjectsResult>{
 
         const projectIds = projectRows.map((row) => row.project_id);
 
-        // One query for all steps across every project, instead of one
-        // query per project (N+1), then group them back up in JS below.
+        // One query for all steps (avoids N+1), grouped by project below.
         const stepRows = await sql`
-            SELECT step_desc, step_state, step_order, locked, project_id
+            SELECT step_id, step_desc, step_state, step_order, locked, project_id
             FROM steps
             WHERE project_id = ANY(${projectIds})
             ORDER BY step_order
         `;
 
-        const stepsByProjectId = new Map<number, step[]>();
+        const stepsByProjectId = new Map<number, stepData[]>();
         for(const row of stepRows){
             const existing = stepsByProjectId.get(row.project_id) ?? [];
-            existing.push(row as step);
+            existing.push(row as stepData);
             stepsByProjectId.set(row.project_id, existing);
         }
 
@@ -112,7 +103,7 @@ export async function fetchProjectById(project_id: string): Promise<FetchProject
     const userId = user.id;
 
     try {
-        // Scoped by userId, same ownership reasoning as everywhere else here.
+        // Scoped by userId, same as elsewhere.
         const [projectRow] = await sql`
             SELECT project_id, name, description, state, userid
             FROM projects
@@ -122,7 +113,7 @@ export async function fetchProjectById(project_id: string): Promise<FetchProject
         if(!projectRow) return { success: false, error: "Project not found" };
 
         const stepRows = await sql`
-            SELECT step_desc, step_state, step_order, locked, project_id
+            SELECT step_id, step_desc, step_state, step_order, locked, project_id
             FROM steps
             WHERE project_id = ${project_id}
             ORDER BY step_order
@@ -134,12 +125,59 @@ export async function fetchProjectById(project_id: string): Promise<FetchProject
             description: projectRow.description,
             state: projectRow.state,
             userid: projectRow.userid,
-            steps: stepRows as step[],
+            steps: stepRows as stepData[],
         };
 
         return { success: true, project: fetchedProject };
     } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to fetch project";
+        return { success: false, error: message };
+    }
+}
+
+
+// Identifies the step by step_id (project_id kept for defense-in-depth, like
+// userid elsewhere). step_order/locked come from RETURNING, not params —
+// don't trust the caller for anything behavior-affecting.
+export async function completeStep(project_id: string, step_id: string): Promise<SaveProjectResult> {
+    const user = await currentUser();
+    if(user == undefined) return { success: false, error: "Not authenticated" };
+    const userId = user.id;
+
+    try {
+        // Joins to projects to check ownership without a separate SELECT.
+        const [updated] = await sql`
+            UPDATE steps
+            SET step_state = 'completed'
+            FROM projects
+            WHERE steps.project_id = projects.project_id
+              AND steps.step_id = ${step_id}
+              AND steps.project_id = ${project_id}
+              AND projects.userid = ${userId}
+            RETURNING steps.project_id, steps.step_order, steps.locked
+        `;
+
+        if(!updated) return { success: false, error: "Step not found" };
+
+        // The locked step never cascades — completing it does nothing else.
+        if(updated.locked) return { success: true, projectId: updated.project_id };
+
+        const [nextStep] = await sql`
+            SELECT step_id
+            FROM steps
+            WHERE project_id = ${project_id} AND step_order = ${updated.step_order + 1}
+        `;
+
+        if(nextStep){
+            await sql`UPDATE steps SET step_state = 'active' WHERE step_id = ${nextStep.step_id}`;
+        } else {
+            // No next step -> this was the last one, so the project itself is done.
+            await sql`UPDATE projects SET state = 'completed' WHERE project_id = ${project_id} AND userid = ${userId}`;
+        }
+
+        return { success: true, projectId: updated.project_id };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to complete step";
         return { success: false, error: message };
     }
 }
@@ -151,9 +189,7 @@ export async function deleteProject(project_id: string): Promise<SaveProjectResu
     const userId = user.id;
 
     try {
-        // Scoped by userId for the same ownership reason as editProject.
-        // steps.project_id has ON DELETE CASCADE, so its rows are removed
-        // automatically — no separate DELETE FROM steps needed here.
+        // Scoped by userId like editProject; steps cascade-delete automatically via FK.
         const [deleted] = await sql`
             DELETE FROM projects
             WHERE project_id = ${project_id} AND userid = ${userId}
@@ -175,18 +211,14 @@ export async function editProject(data: project): Promise<SaveProjectResult> {
     if(user == undefined) return { success: false, error: "Not authenticated" };
     const userId = user.id;
 
-    // `data.userid` is ignored here too — same reasoning as saveProject:
-    // never trust a client-supplied userid, scope by the authenticated user.
+    // data.userid ignored — never trust client-supplied userid, use the authenticated one.
     const { project_id, name, description, state, steps } = data;
 
-    // Same reasoning as saveProject: this is a server action, so validate
-    // `steps` is actually an array before looping over it.
+    // Same as saveProject: validate `steps` is an array before looping.
     if(!Array.isArray(steps)) return { success: false, error: "Invalid steps data" };
 
     try {
-        // Scope the UPDATE to userId, not just project_id — otherwise any
-        // authenticated user could edit another user's project by guessing
-        // its project_id, since project_id alone isn't a secret.
+        // Scope by userId too — project_id alone isn't secret, so anyone could guess it.
         const [updated] = await sql`
             UPDATE projects
             SET name = ${name}, description = ${description}, state = ${state}
@@ -194,8 +226,7 @@ export async function editProject(data: project): Promise<SaveProjectResult> {
             RETURNING project_id
         `;
 
-        // No row matched -> either the project doesn't exist or it isn't
-        // this user's, so fail before touching any steps.
+        // No row matched -> not found or not owned; fail before touching steps.
         if(!updated) return { success: false, error: "Project not found" };
 
         // Full replace: drop the old steps, then insert the current set.

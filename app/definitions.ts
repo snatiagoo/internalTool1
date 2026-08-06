@@ -1,7 +1,5 @@
 
-// Shape the dashboard form submits to create a project — no project_id (not
-// assigned yet) and no userid (saveProject derives it from the authenticated
-// user rather than trusting a client-supplied value).
+// Create-time shape: no project_id/userid yet (saveProject derives userid server-side).
 export type projectData = {
     name: string,
     description: string,
@@ -9,15 +7,14 @@ export type projectData = {
     steps: step[],
 }
 
-// Shape of a project once it exists in the DB (fetchProjects' result, and
-// what editProject needs to identify which project to update).
+// Shape once a project exists in the DB; steps are stepData since they exist too.
 export type project = {
     project_id: string,
     name: string,
     description: string,
     state: string,
     userid: string,
-    steps: step[],
+    steps: stepData[],
 }
 
 
@@ -30,8 +27,12 @@ export type step = {
         project_id: string,
 }
 
-// Discriminated union so callers can check `.success` and TS narrows
-// which of `projectId`/`error` is actually present.
+// Same project/projectData split, one level down: a step that exists in the DB.
+export type stepData = step & {
+    step_id: string,
+}
+
+// Discriminated union: check `.success` to narrow which field is present.
 export type SaveProjectResult =
     | { success: true, projectId: number }
     | { success: false, error: string }

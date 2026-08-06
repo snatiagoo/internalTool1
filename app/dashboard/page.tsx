@@ -2,29 +2,11 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { saveProject, deleteProject, editProject, fetchProjects } from "../db";
-import { projectData, project, step } from "../definitions";
-
-function PencilIcon() {
-    return (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-            <path d="M12 20h9" />
-            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-        </svg>
-    );
-}
-
-function TrashIcon() {
-    return (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-            <path d="M3 6h18" />
-            <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-            <line x1="10" y1="11" x2="10" y2="17" />
-            <line x1="14" y1="11" x2="14" y2="17" />
-        </svg>
-    );
-}
+import { saveProject, deleteProject, editProject, fetchProjects, fetchProjectById, completeStep } from "../db";
+import { projectData, project, step, stepData } from "../definitions";
+import { PencilIcon } from "../ui/PencilIcon";
+import { TrashIcon } from "../ui/TrashIcon";
+import { CheckIcon } from "../ui/CheckIcon";
 
 export default function Dashboard() {
     const [isOpen, setIsOpen] = useState(false);
@@ -32,21 +14,18 @@ export default function Dashboard() {
 
     const [projects, setProjects] = useState<project[]>([]);
     const [loadError, setLoadError] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
 
     useEffect(() => {
-        // The `[]` at the end means "run this effect once, right after the
-        // first render" — not on every re-render. An effect with no array
-        // at all would run after every single render, which we don't want here.
+        // `[]` means this runs once on mount, not on every re-render.
         fetchProjects().then((result) => {
-            // `result` is a "discriminated union": either { success: true, projects }
-            // or { success: false, error }. Checking `result.success` first lets
-            // TypeScript know which of those two shapes we're holding, so it allows
-            // `result.projects` in this branch and `result.error` in the other.
+            // Discriminated union — checking `.success` lets TS narrow which field is safe here.
             if (result.success) {
                 setProjects(result.projects);
             } else {
                 setLoadError(result.error);
             }
+            setIsLoading(false);
         });
     }, []);
 
@@ -57,13 +36,9 @@ export default function Dashboard() {
     const [editExtraSteps, setEditExtraSteps] = useState(0);
     const [editError, setEditError] = useState<string | null>(null);
 
-    // Steps typed at creation always have order 0 = locked step, then 1..N
-    // for the regular ones. Always show at least 3 regular-step inputs in
-    // the edit form, even if the project has fewer, so nothing looks cut off.
+    // Order 0 = locked step, 1..N = regular. Always show >=3 step inputs so nothing looks cut off.
     const editRegularSteps = editingProject
-        // `(a, b) => a.step_order - b.step_order` is the standard way to sort
-        // numbers ascending: .sort() expects a negative/zero/positive number
-        // back, and subtracting does exactly that.
+        // Subtracting sorts ascending — `.sort()` expects a negative/zero/positive result.
         ? editingProject.steps.filter((s) => !s.locked).sort((a, b) => a.step_order - b.step_order)
         : [];
     const editBaseStepCount = Math.max(3, editRegularSteps.length);
@@ -71,12 +46,9 @@ export default function Dashboard() {
     async function handleSave(e: React.SubmitEvent<HTMLFormElement>) {
         e.preventDefault(); // stops the browser from doing its default full-page reload on submit
 
-        // e.currentTarget is the <form> element itself; FormData reads the
-        // current value of every input inside it that has a `name` attribute.
+        // e.currentTarget is the form; FormData reads every named input inside it.
         const formData = new FormData(e.currentTarget);
-        // .get() always returns `FormDataEntryValue | null` (it could be a File
-        // for a file input), so `as string` just tells TypeScript "trust me,
-        // this is a text input, treat it as a string".
+        // .get() returns `FormDataEntryValue | null`; `as string` asserts it's text.
         const name = formData.get("name") as string;
         const description = formData.get("description") as string;
         const lockedStep = formData.get("locked_step") as string;
@@ -84,8 +56,7 @@ export default function Dashboard() {
         const step2 = formData.get("step2") as string;
         const step3 = formData.get("step3") as string;
 
-        // locked_step is always step_order 0; step1-3 fill in after it.
-        // Empty step inputs are dropped since step_desc is NOT NULL in the DB.
+        // locked_step is order 0, step1-3 follow; blanks are dropped (step_desc is NOT NULL).
         const steps: step[] = [
             { step_desc: lockedStep, step_state: "active", step_order: 0, locked: true, project_id: "" },
             { step_desc: step1, step_state: "active", step_order: 1, locked: false, project_id: "" },
@@ -106,27 +77,14 @@ export default function Dashboard() {
             setError(null);
             setIsOpen(false);
 
-            // saveProject returns projectId as a number (straight from Postgres),
-            // but our `project` type stores it as a string, so convert it here.
+            // Re-fetch instead of hand-building: saveProject doesn't return step_ids,
+            // and the tick button needs real ones.
             const projectId = String(result.projectId);
-            // `(prev) => [...prev, newItem]` — using a function form, rather than
-            // `[...projects, newItem]` — guarantees we're building on top of the
-            // actual latest state, not a possibly-stale `projects` variable from
-            // this render. `...prev` copies all the existing projects into a new
-            // array before adding the new one (state should never be mutated directly).
-            setProjects((prev) => [
-                ...prev,
-                {
-                    project_id: projectId,
-                    name,
-                    description,
-                    state: "active",
-                    userid: "",
-                    // `{ ...s, project_id: projectId }` copies every field of `s`
-                    // and then overwrites just `project_id` with the real one.
-                    steps: steps.map((s) => ({ ...s, project_id: projectId })),
-                },
-            ]);
+            const fresh = await fetchProjectById(projectId);
+            if (fresh.success) {
+                // Function form builds on the latest state, not a possibly-stale `projects`.
+                setProjects((prev) => [...prev, fresh.project]);
+            }
         } else {
             setError(result.error);
         }
@@ -155,33 +113,29 @@ export default function Dashboard() {
         const description = formData.get("description") as string;
         const lockedStepDesc = formData.get("locked_step") as string;
 
-        const newSteps: step[] = [];
+        const newSteps: stepData[] = [];
 
         if (lockedStepDesc.trim() !== "") {
             const originalLocked = editingProject.steps.find((s) => s.locked);
             newSteps.push({
                 step_desc: lockedStepDesc,
-                // `?.` ("optional chaining") reads .step_state only if
-                // originalLocked actually exists, giving undefined instead of
-                // crashing if it doesn't. `?? "active"` ("nullish coalescing")
-                // then swaps in "active" if that result was null/undefined.
+                // `?.` avoids crashing if originalLocked is undefined; `?? "active"` supplies the fallback.
                 step_state: originalLocked?.step_state ?? "active",
                 step_order: 0,
                 locked: true,
                 project_id: editingProject.project_id,
+                // Ignored server-side (editProject recreates steps) — only here to satisfy stepData's type.
+                step_id: originalLocked?.step_id ?? "",
             });
         }
 
         let order = 1;
         for (let i = 0; i < editBaseStepCount + editExtraSteps; i++) {
-            // Template literal: `step${i + 1}` builds the strings "step1",
-            // "step2", etc. to match the `name` attribute each input below was
-            // rendered with.
+            // `step${i+1}` matches each input's `name` below.
             const value = formData.get(`step${i + 1}`) as string;
             if (value.trim() === "") continue;
 
-            // Carry over the original step_state for steps that already
-            // existed; new ones (added via "+") default to pending.
+            // Carry over step_state for existing steps; new ones default to pending.
             const original = editRegularSteps[i];
             newSteps.push({
                 step_desc: value,
@@ -189,6 +143,7 @@ export default function Dashboard() {
                 step_order: order,
                 locked: false,
                 project_id: editingProject.project_id,
+                step_id: original?.step_id ?? "",
             });
             order++;
         }
@@ -206,28 +161,81 @@ export default function Dashboard() {
 
         if (result.success) {
             setEditError(null);
-            setProjects((prev) => prev.map((p) => (p.project_id === editingProject.project_id ? data : p)));
             setEditingProject(null);
+
+            // Re-fetch instead of using `data`: editProject reassigns fresh step_ids we never see back.
+            const fresh = await fetchProjectById(editingProject.project_id);
+            if (fresh.success) {
+                setProjects((prev) => prev.map((p) => (p.project_id === editingProject.project_id ? fresh.project : p)));
+            }
         } else {
             setEditError(result.error);
         }
     }
 
+    async function handleCompleteStep(project_id: string, step_id: string) {
+        const result = await completeStep(project_id, step_id);
+        if (!result.success) return;
+
+        // Re-fetch instead of re-deriving the cascade in JS — completeStep may
+        // activate the next step or complete the project, and the result doesn't say which.
+        const fresh = await fetchProjectById(project_id);
+        if (fresh.success) {
+            setProjects((prev) => prev.map((p) => (p.project_id === project_id ? fresh.project : p)));
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
     return (
         <div>
+            <div className="px-6 pt-8">
+                <h1 className="text-2xl font-semibold tracking-tight">Your projects</h1>
+                <p className="mt-1 text-sm text-foreground/60">
+                    {projects.length === 0
+                        ? "Nothing here yet."
+                        : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
+                </p>
+            </div>
+
             {loadError && (
-                <p className="px-6 pt-6 text-sm text-red-500">{loadError}</p>
+                <p className="px-6 pt-4 text-sm text-red-500">{loadError}</p>
+            )}
+
+            {isLoading && (
+                <p className="px-6 pt-6 text-sm text-foreground/50">Loading projects…</p>
+            )}
+
+            {!isLoading && !loadError && projects.length === 0 && (
+                <p className="px-6 pt-6 text-sm text-foreground/50">
+                    No projects yet — use the + button to create one.
+                </p>
             )}
 
             <div className="grid grid-cols-2 gap-4 p-6">
                 {projects.map((proj) => {
-                    // The locked step is always "active" too (see saveProject/
-                    // handleSave), but we don't want it shown here — so this
-                    // looks for the first active step that ISN'T the locked one.
+                    // Locked step is always active too, but excluded here — find the active non-locked one.
                     const activeStep = proj.steps.find((s) => s.step_state === "active" && !s.locked);
 
                     return (
-                        <div key={proj.project_id} className="relative rounded-lg border border-foreground/10 bg-background p-4 shadow-sm">
+                        <div
+                            key={proj.project_id}
+                            className="relative flex flex-col rounded-lg border border-foreground/10 bg-background p-4 shadow-sm transition hover:shadow-md"
+                        >
                             <div className="absolute top-3 right-3 flex gap-1">
                                 <button
                                     type="button"
@@ -255,18 +263,31 @@ export default function Dashboard() {
                             </div>
 
                             <h3 className="pr-16 font-semibold">{proj.name}</h3>
-                            <p className="mt-1 text-xs uppercase tracking-wide text-foreground/50">{proj.state}</p>
-                            <p className="mt-2 text-sm text-foreground/70">
-                                {activeStep ? activeStep.step_desc : "No active step"}
-                            </p>
+                            <span className="mt-1 inline-block w-fit rounded-full border border-foreground/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-foreground/60">
+                                {proj.state}
+                            </span>
 
-                            {/* The `[id]` folder in app/project/[id]/page.tsx matches
-                                whatever value sits in this spot of the URL — so filling
-                                it in with proj.project_id here is what makes that page's
-                                `params.id` equal to this specific project's id. */}
+                            {/* Slightly light box so it doesn't compete with the card border. */}
+                            <div className="mt-3 flex items-center justify-between gap-2 rounded-md bg-foreground/5 px-3 py-2">
+                                <span className="text-sm text-foreground/80">
+                                    {activeStep ? activeStep.step_desc : "No active step"}
+                                </span>
+                                {activeStep && (
+                                    <button
+                                        type="button"
+                                        aria-label="Mark step done"
+                                        onClick={() => handleCompleteStep(proj.project_id, activeStep.step_id)}
+                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-foreground/40 transition hover:bg-foreground/10 hover:text-foreground cursor-pointer"
+                                    >
+                                        <CheckIcon />
+                                    </button>
+                                )}
+                            </div>
+
+                            {/* proj.project_id here fills the `[id]` segment matched by app/project/[id]/page.tsx. */}
                             <Link
                                 href={`/project/${proj.project_id}`}
-                                className="mt-3 inline-block text-sm font-medium underline underline-offset-2"
+                                className="mt-3 text-sm font-medium text-foreground/70 underline underline-offset-2 transition hover:text-foreground"
                             >
                                 View details
                             </Link>
@@ -285,7 +306,7 @@ export default function Dashboard() {
             </button>
 
             {isOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
                     <form onSubmit={handleSave} className="w-full sm:w-1/2 rounded-lg border border-foreground/10 bg-background p-6 shadow-xl">
                         <h2 className="text-lg font-semibold">New project</h2>
 
@@ -354,16 +375,13 @@ export default function Dashboard() {
             )}
 
             {editingProject && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
                     <form onSubmit={handleEditSubmit} className="w-full sm:w-1/2 rounded-lg border border-foreground/10 bg-background p-6 shadow-xl">
                         <h2 className="text-lg font-semibold">Edit project</h2>
 
                         <div className="mt-4 flex flex-col gap-3">
-                            {/* `defaultValue` (not `value`) makes this an "uncontrolled"
-                                input: React sets the starting text, then hands control
-                                to the browser — typing doesn't trigger a state update on
-                                every keystroke. We only read the final text back out via
-                                FormData when the form is submitted. */}
+                            {/* `defaultValue` makes this uncontrolled — no state update per
+                                keystroke; FormData reads the final value on submit. */}
                             <input
                                 type="text"
                                 placeholder="Name"
@@ -387,11 +405,7 @@ export default function Dashboard() {
                                 className="rounded-md border-2 border-foreground bg-foreground/5 px-3 py-2 text-sm font-medium outline-none focus:border-foreground"
                             />
 
-                            {/* Array.from({ length: N }) makes an array of N empty
-                                slots just so we can .map() over it — a common trick for
-                                "render this many things" when there's no real array to
-                                loop over. `key` just needs to be unique among these
-                                inputs so React can track which is which between renders. */}
+                            {/* Array.from({length:N}) creates N slots to .map() over — the "render N things" trick. */}
                             {Array.from({ length: editBaseStepCount + editExtraSteps }).map((_, i) => (
                                 <input
                                     key={i}
@@ -439,7 +453,7 @@ export default function Dashboard() {
             )}
 
             {confirmDeleteId && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
                     <div className="w-full max-w-sm rounded-lg border border-foreground/10 bg-background p-6 shadow-xl">
                         <h2 className="text-lg font-semibold">Delete project?</h2>
                         <p className="mt-2 text-sm text-foreground/70">
