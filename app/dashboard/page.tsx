@@ -1,5 +1,11 @@
 "use client";
 
+/*
+@types/node is pinned to ^20 in devDependencies,
+if you ever hit weird Node-API typing gaps, 
+that's the first place to look. 
+*/
+
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { saveProject, deleteProject, editProject, fetchProjects, fetchProjectById, completeStep } from "../db";
