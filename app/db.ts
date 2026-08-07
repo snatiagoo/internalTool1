@@ -8,7 +8,7 @@ const sql = neon(`${process.env.DATABASE_URL}`);
 
 
 export async function saveProject(data: projectData): Promise<SaveProjectResult> {
-
+    // imports currentUser 
     const user = await currentUser();
     // Typed result instead of throw, so callers can branch on `.success`.
     if(user == undefined) return { success: false, error: "Not authenticated" };
@@ -20,6 +20,8 @@ export async function saveProject(data: projectData): Promise<SaveProjectResult>
     if(!Array.isArray(steps)) return { success: false, error: "Invalid steps data" };
 
     // DB already enforces NOT NULL; this just turns any failure into a typed error.
+    // sql is returned from neon, which is imported and callable "neon()"
+    // sql returns an object with a property project_id
     try {
         const [project] = await sql`
             INSERT INTO projects (name, description, state, userid)
@@ -36,29 +38,37 @@ export async function saveProject(data: projectData): Promise<SaveProjectResult>
                 VALUES (${step_desc}, ${step_state}, ${step_order}, ${locked}, ${projectId})
             `;
         }
+        // idk how I should look at the for loop from a vitest perspective? Maybe as data is a fake I have created
+        // I just inser the steps.length value I have given it?
 
         return { success: true, projectId };
     } catch (err) {
         // narrow `unknown` before reading `.message`
+
         const message = err instanceof Error ? err.message : "Failed to save project";
         return { success: false, error: message };
     }
+    // function should return object with success and either projectId or error property string
+    // depending on the test im doing
 }
 
 
 
 export async function fetchProjects(): Promise<FetchProjectsResult>{
     const user = await currentUser();
+    //again we need the mock of that
     // Typed result instead of throw, so callers can branch on `.success`.
     if(user == undefined) return { success: false, error: "Not authenticated" };
     const userId = user.id;
-
+    // mock the try catch as well
     try {
+        // sql has to be hoisted and then neon mocked with the mocked sql
         const projectRows = await sql`
             SELECT project_id, name, description, state, userid
             FROM projects
             WHERE userid = ${userId}
         `;
+        // you have to mock the resolved value of projectRows for that case (length 0)?
 
         // No projects -> skip the steps round trip entirely.
         if(projectRows.length === 0) return { success: true, projects: [] };
@@ -88,9 +98,11 @@ export async function fetchProjects(): Promise<FetchProjectsResult>{
             userid: row.userid,
             steps: stepsByProjectId.get(row.project_id) ?? [],
         }));
+        // just mock the resolved value of projects 
 
         return { success: true, projects };
     } catch (err) {
+        // mock for a typed error instead of throwing
         const message = err instanceof Error ? err.message : "Failed to fetch projects";
         return { success: false, error: message };
     }
